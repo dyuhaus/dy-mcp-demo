@@ -1,0 +1,13 @@
+{
+  "name": "quill-md",
+  "version": "0.2.1",
+  "description": "A tiny markdown-to-HTML converter.",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "test": "node --test tests/",
+    "build": "echo 'no build step'"
+  },
+  "keywords": ["markdown", "html", "renderer"],
+  "license": "MIT"
+}
