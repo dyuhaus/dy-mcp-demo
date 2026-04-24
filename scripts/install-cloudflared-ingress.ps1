@@ -10,8 +10,9 @@
   Editing the user-profile config won't affect the service.
 
   This script inserts a new hostname mapping for demo-mcp.dyuhaus.com ->
-  http://localhost:7879 before the http_status:404 fallback. If the rule
-  is already present it's left untouched.
+  http://localhost:7879 before the http_status:404 fallback. If a prior
+  run wrote a broken rule (merged onto the wrong line), it automatically
+  restores the .bak copy before re-inserting.
 
 .NOTES
   Requires an elevated PowerShell.
@@ -20,37 +21,66 @@
 #>
 
 $ConfigPath = "C:\Windows\System32\config\systemprofile\.cloudflared\config.yml"
+$BackupPath = $ConfigPath + ".bak"
 $Hostname   = "demo-mcp.dyuhaus.com"
 $Service    = "http://localhost:7879"
 
 if (-not (Test-Path $ConfigPath)) {
     Write-Host "Systemprofile cloudflared config not found at $ConfigPath." -ForegroundColor Red
-    Write-Host "Has cloudflared been installed as a service on this box?"
     exit 1
 }
 
-$config = Get-Content -Raw $ConfigPath
+# If a previous run left a mangled config, roll back first.
+$rawNow = Get-Content -Raw $ConfigPath
+$looksBroken = $rawNow -match "http://localhost:\d+\s+-\s+hostname:"
+if ($looksBroken -and (Test-Path $BackupPath)) {
+    Write-Host "Detected a broken config from a prior run. Restoring from $BackupPath..." -ForegroundColor Yellow
+    Copy-Item $BackupPath $ConfigPath -Force
+}
 
-if ($config -match [regex]::Escape($Hostname)) {
+# Read as lines and check whether the rule is already present.
+$lines = Get-Content $ConfigPath
+if ($lines -match [regex]::Escape("hostname: $Hostname")) {
     Write-Host "Ingress rule for $Hostname already present. Nothing to do." -ForegroundColor Yellow
 } else {
-    $newBlock = "  - hostname: $Hostname`n    service: $Service`n"
-    $updated  = $config -replace "(?s)(?=\s*-\s*service:\s*http_status:404\b)", $newBlock
-
-    if ($updated -eq $config) {
-        Write-Host "Could not find the 'http_status:404' fallback to insert before." -ForegroundColor Red
+    $fallbackIndex = -1
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -match "^\s*-\s+service:\s+http_status:404") {
+            $fallbackIndex = $i
+            break
+        }
+    }
+    if ($fallbackIndex -lt 0) {
+        Write-Host "Could not find the 'http_status:404' fallback line." -ForegroundColor Red
         Write-Host "Inspect $ConfigPath manually." -ForegroundColor Red
         exit 1
     }
 
-    # Back up, then overwrite.
-    Copy-Item $ConfigPath ($ConfigPath + ".bak") -Force
-    [System.IO.File]::WriteAllText($ConfigPath, $updated)
-    Write-Host "Added ingress rule for $Hostname (backup saved to $ConfigPath.bak)." -ForegroundColor Green
+    # Back up before editing.
+    Copy-Item $ConfigPath $BackupPath -Force
+
+    $before   = $lines[0..($fallbackIndex - 1)]
+    $fallback = $lines[$fallbackIndex..($lines.Count - 1)]
+    $inject   = @("  - hostname: $Hostname", "    service: $Service")
+    $updated  = @()
+    $updated += $before
+    $updated += $inject
+    $updated += $fallback
+
+    # Preserve the existing file's encoding/line endings by writing via .NET.
+    [System.IO.File]::WriteAllLines($ConfigPath, $updated)
+    Write-Host "Added ingress rule for $Hostname (backup saved to $BackupPath)." -ForegroundColor Green
 }
 
 Write-Host "Restarting cloudflared service..."
-Restart-Service cloudflared
+try {
+    Restart-Service cloudflared -ErrorAction Stop
+} catch {
+    Write-Host "Restart-Service failed: $_" -ForegroundColor Red
+    Write-Host "Config at $ConfigPath (first 40 lines):"
+    (Get-Content $ConfigPath -TotalCount 40) | ForEach-Object { Write-Host "  $_" }
+    exit 1
+}
 Start-Sleep -Seconds 2
 $status = (Get-Service cloudflared).Status
 Write-Host "cloudflared service status: $status"
